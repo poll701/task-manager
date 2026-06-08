@@ -1,6 +1,5 @@
 from task import Task
 
-
 class UndoStack:
     def __init__(self, store, bst, queue):
         self.actions = []      # список выполненных действий
@@ -17,34 +16,42 @@ class UndoStack:
 
     def undo_last(self):
         # откатываем последнее действие и возвращаем текст о том, что сделали
-        if not self.actions:
+        if self.is_empty():
             return "отменять нечего"
 
-        action = self.actions.pop()
-        kind = action["type"]
+        last_action = self.actions.pop()
+        action_type = last_action["type"]
 
-        if kind == "add":
+        if action_type == "add":
             # добавление отменяем удалением задачи
-            task_id = action["task_id"]
+            task_id = last_action["task_id"]
             self.store.remove(task_id)
             self.queue.remove(task_id)
+            
             self.bst.rebuild(self.store.get_all())
-            return "отменено добавление задачи #%d" % task_id
+            return f"отменено добавление задачи #{task_id}"
 
-        if kind == "delete":
+        elif action_type == "delete":
             # удаление отменяем восстановлением задачи из сохраненных данных
-            task = Task.from_dict(action["task_data"])
-            self.store.add(task)
+            saved_data = last_action["task_data"]
+            restored_task = Task.from_dict(saved_data)
+            
+            self.store.add(restored_task)
             self.bst.rebuild(self.store.get_all())
-            return "восстановлена задача #%d" % task.id
+            return f"восстановлена задача #{restored_task.id}"
 
-        if kind == "edit":
+        elif action_type == "edit":
             # изменение отменяем возвратом старого значения поля
-            task_id = action["task_id"]
-            field = action["field"]
-            self.store.update_field(task_id, field, action["old_value"])
-            if field == "deadline":
+            task_id = last_action["task_id"]
+            field_name = last_action["field"]
+            old_text = last_action["old_value"]
+            
+            self.store.update_field(task_id, field_name, old_text)
+            
+            if field_name == "deadline":
                 self.bst.rebuild(self.store.get_all())
-            return "отменено изменение задачи #%d" % task_id
+                
+            return f"отменено изменение задачи #{task_id}"
 
-        return "неизвестное действие"
+        else:
+            return "неизвестное действие"
