@@ -85,7 +85,7 @@ def add_dialog(tm):
         return
     priority = ask_int("Приоритет от 1 до 5: ", 1, 5)
     time = ask_int("Время выполнения в минутах: ", 0, 100000)
-    deadline = input("Дедлайн (ГГГГ-ММ-ДД): ").strip()
+    deadline = ask_date("Дедлайн (ГГГГ-ММ-ДД): ")
     status = ask_status()
     category = input("Категория (пусто = прочее): ").strip()
     try:
