@@ -60,6 +60,15 @@ def run_filter(tasks, f, sort_field, ascending):
     return found
 
 
+# текст для диапазона от и до, пустые границы не показываем
+def range_text(low, high):
+    if low is not None and high is not None:
+        return f"от {low} до {high}"
+    if low is not None:
+        return f"от {low}"
+    return f"до {high}"
+
+
 # короткое описание фильтра для заголовка результата
 def describe(f, sort_field, ascending):
     parts = []
@@ -68,13 +77,13 @@ def describe(f, sort_field, ascending):
     if f["category"] is not None:
         parts.append(f"категория {f['category']}")
     if f["priority_from"] is not None or f["priority_to"] is not None:
-        parts.append(f"приоритет {f['priority_from']}..{f['priority_to']}")
+        parts.append("приоритет " + range_text(f["priority_from"], f["priority_to"]))
     if f["deadline_from"] is not None or f["deadline_to"] is not None:
-        parts.append(f"дедлайн {f['deadline_from']}..{f['deadline_to']}")
+        parts.append("дедлайн " + range_text(f["deadline_from"], f["deadline_to"]))
     if f["keyword"] is not None:
         parts.append(f"слово '{f['keyword']}'")
     if f["time_from"] is not None or f["time_to"] is not None:
-        parts.append(f"время {f['time_from']}..{f['time_to']}")
+        parts.append("время " + range_text(f["time_from"], f["time_to"]))
     if not parts:
         parts.append("без условий")
     order = "по возрастанию" if ascending else "по убыванию"
