@@ -1,5 +1,6 @@
 # консольный менеджер задач, ввод команд и главный цикл
 
+from manager import TaskManager, format_task, valid_date, STATUSES, EDITABLE
 from manager import TaskManager, format_task, STATUSES, EDITABLE
 from filters import empty_filter, run_filter, describe, SORT_FIELDS, SavedQueries, ViewHistory
 
