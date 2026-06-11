@@ -1,385 +1,382 @@
-from datetime import datetime
+# консольный менеджер задач, ввод команд и главный цикл
 
-from task import TaskStore, DATE_FORMAT, ALLOWED_STATUSES
-from bst import BST
-from queue_module import TaskQueue
-from undo import UndoStack
-from filters import filter_tasks, sort_tasks, SavedFilters, SORT_KEYS
-from history import NavigationHistory, Snapshot
-import storage
-
-STATE_PATH = "data/state.json"
-
-# создаем все хранилища один раз при запуске
-store = TaskStore()
-bst = BST()
-queue = TaskQueue()
-saved = SavedFilters()
-history = NavigationHistory()
-undo = UndoStack(store, bst, queue)
-
-# какие поля задачи разрешено менять
-EDITABLE = ("title", "priority", "duration", "deadline", "status", "category")
+from manager import TaskManager, format_task, STATUSES, EDITABLE
+from filters import empty_filter, run_filter, describe, SORT_FIELDS, SavedQueries, ViewHistory
 
 
-# --- помощники для ввода ---
-
-def ask(prompt):
-    return input(prompt).strip()
-
-
-def ask_int(prompt, allow_empty=False):
-    # спрашиваем целое число, при allow_empty пустой ввод дает None
-    while True:
-        raw = input(prompt).strip()
-        if raw == "" and allow_empty:
-            return None
-        try:
-            return int(raw)
-        except ValueError:
-            print("нужно целое число")
-
-
-def ask_deadline(prompt, allow_empty=False):
-    # спрашиваем дату в формате 2026-06-15 18:00
-    while True:
-        raw = input(prompt).strip()
-        if raw == "" and allow_empty:
-            return None
-        try:
-            return datetime.strptime(raw, DATE_FORMAT)
-        except ValueError:
-            print("формат даты: 2026-06-15 18:00")
+# печатает список доступных команд
+def show_help():
+    print("Доступные команды:")
+    print("  add                     добавить задачу")
+    print("  del <id>                удалить задачу")
+    print("  edit <id>               изменить поле задачи")
+    print("  list                    все задачи по возрастанию дедлайна")
+    print("  early                   задача с самым ранним дедлайном")
+    print("  late                    задача с самым поздним дедлайном")
+    print("  enqueue <id>            поставить задачу в очередь на исполнение")
+    print("  next                    исполнить следующую задачу из очереди")
+    print("  queue                   показать очередь на исполнение")
+    print("  undo                    отменить последнее действие")
+    print("  find                    найти задачи по условиям")
+    print("  save <имя>              сохранить последний фильтр под именем")
+    print("  run <имя>               выполнить сохраненный фильтр")
+    print("  saved                   список сохраненных фильтров")
+    print("  rename <старое> <новое> переименовать сохраненный фильтр")
+    print("  drop <имя>              удалить сохраненный фильтр")
+    print("  back                    предыдущий результат поиска")
+    print("  forward                 следующий результат поиска")
+    print("  help                    показать команды")
+    print("  quit                    выход")
 
 
-def show_tasks(tasks):
+# выводит список задач или сообщение, что задач нет
+def print_tasks(tasks):
     if not tasks:
-        print("ничего нет")
+        print("Задач нет.")
         return
     for task in tasks:
-        print(task)
+        print("  " + format_task(task))
 
 
-# --- команды работы с задачами ---
-
-def add_task_cmd():
-    title = ask("название: ")
-    priority = ask_int("приоритет 1-5: ")
-    duration = ask_int("время в минутах: ")
-    deadline = ask_deadline("дедлайн (2026-06-15 18:00): ")
-    category = ask("категория: ") or "прочее"
-    try:
-        task = store.create(title, priority, duration, deadline, "новая", category)
-    except ValueError as error:
-        print("ошибка:", error)
-        return
-    bst.insert(task)
-    undo.push({"type": "add", "task_id": task.id})
-    print("добавлена задача #%d" % task.id)
-
-
-def delete_task_cmd():
-    task_id = ask_int("номер задачи для удаления: ")
-    task = store.get_by_id(task_id)
-    if task is None:
-        print("задачи с таким номером нет")
-        return
-    # сначала запоминаем данные, потом удаляем
-    undo.push({"type": "delete", "task_data": task.to_dict()})
-    store.remove(task_id)
-    queue.remove(task_id)
-    bst.rebuild(store.get_all())
-    print("задача #%d удалена" % task_id)
-
-
-def read_field_value(field):
-    # спрашиваем новое значение поля с нужной проверкой
-    if field == "priority":
-        value = ask_int("новый приоритет 1-5: ")
-        if not 1 <= value <= 5:
-            print("приоритет от 1 до 5")
-            return None
-        return value
-    if field == "duration":
-        value = ask_int("новое время в минутах: ")
-        if value < 0:
-            print("время не может быть отрицательным")
-            return None
-        return value
-    if field == "deadline":
-        return ask_deadline("новый дедлайн: ")
-    if field == "status":
-        value = ask("новый статус (%s): " % ", ".join(ALLOWED_STATUSES))
-        if value not in ALLOWED_STATUSES:
-            print("недопустимый статус")
-            return None
-        return value
-    if field == "title":
-        value = ask("новое название: ")
-        if not value:
-            print("название не может быть пустым")
-            return None
-        return value
-    # категория без особых проверок
-    return ask("новое значение: ")
-
-
-def edit_task_cmd():
-    task_id = ask_int("номер задачи для изменения: ")
-    task = store.get_by_id(task_id)
-    if task is None:
-        print("задачи с таким номером нет")
-        return
-    print("поля:", ", ".join(EDITABLE))
-    field = ask("какое поле менять: ")
-    if field not in EDITABLE:
-        print("нет такого поля")
-        return
-
-    old_value = getattr(task, field)
-    new_value = read_field_value(field)
-    if new_value is None:
-        return
-
-    undo.push({"type": "edit", "task_id": task_id,
-               "field": field, "old_value": old_value})
-    store.update_field(task_id, field, new_value)
-    if field == "deadline":
-        bst.rebuild(store.get_all())
-    print("задача #%d изменена" % task_id)
-
-
-def enqueue_cmd():
-    task_id = ask_int("номер задачи в очередь: ")
-    if store.get_by_id(task_id) is None:
-        print("задачи с таким номером нет")
-        return
-    queue.enqueue(task_id)
-    print("задача #%d поставлена в очередь" % task_id)
-
-
-def dequeue_cmd():
-    task_id = queue.dequeue()
-    if task_id is None:
-        print("очередь пуста")
-        return
-    task = store.get_by_id(task_id)
-    if task is None:
-        print("задача #%d уже удалена" % task_id)
-    else:
-        print("следующая на исполнение:", task)
-
-
-def show_by_deadline_cmd():
-    show_tasks(bst.in_order())
-
-
-def earliest_cmd():
-    task = bst.find_min()
-    print("самый ранний дедлайн:", task if task else "задач нет")
-
-
-def latest_cmd():
-    task = bst.find_max()
-    print("самый поздний дедлайн:", task if task else "задач нет")
-
-
-def undo_cmd():
-    print(undo.undo_last())
-
-
-# --- фильтрация ---
-
-def build_conditions():
-    # спрашиваем все условия, пустой ввод значит не фильтровать по полю
-    print("оставляйте поле пустым, если оно не нужно")
-    conditions = {}
-
-    conditions["status"] = ask("статус (%s): " % ", ".join(ALLOWED_STATUSES)) or None
-    conditions["category"] = ask("категория: ") or None
-    conditions["priority_min"] = ask_int("приоритет от: ", allow_empty=True)
-    conditions["priority_max"] = ask_int("приоритет до: ", allow_empty=True)
-    conditions["deadline_from"] = ask_deadline("дедлайн от: ", allow_empty=True)
-    conditions["deadline_to"] = ask_deadline("дедлайн до: ", allow_empty=True)
-    conditions["keyword"] = ask("ключевое слово в названии: ") or None
-    conditions["duration_min"] = ask_int("время от: ", allow_empty=True)
-    conditions["duration_max"] = ask_int("время до: ", allow_empty=True)
-    return conditions
-
-
-def ask_sort():
-    # спрашиваем поле и направление сортировки
-    print("поля сортировки:", ", ".join(SORT_KEYS.keys()))
-    field = ask("сортировать по: ")
-    if field not in SORT_KEYS:
-        field = "deadline"
-    ascending = ask("по возрастанию? (д/н): ").lower() != "н"
-    return field, ascending
-
-
-def run_filter(conditions, sort_field, ascending):
-    # применяем фильтр, печатаем результат и кладем снимок в историю
-    found = filter_tasks(store.get_all(), conditions)
-    found = sort_tasks(found, sort_field, ascending)
-    show_tasks(found)
-    snapshot = Snapshot(conditions, sort_field, ascending,
-                        [t.id for t in found])
-    history.push_new(snapshot)
-
-
-def filter_cmd():
-    conditions = build_conditions()
-    sort_field, ascending = ask_sort()
-    run_filter(conditions, sort_field, ascending)
-
-
-# --- сохраненные фильтры ---
-
-def save_current_filter():
-    if history.current is None:
-        print("сначала примените какой-нибудь фильтр")
-        return
-    name = ask("имя фильтра: ")
-    if not name:
-        print("имя не может быть пустым")
-        return
-    if saved.has(name):
-        if ask("имя занято, перезаписать? (д/н): ").lower() != "д":
-            return
-    snap = history.current
-    saved.save(name, snap.conditions, snap.sort_field, snap.ascending)
-    print("фильтр сохранен как '%s'" % name)
-
-
-def apply_saved_filter():
-    name = ask("имя фильтра: ")
-    f = saved.get(name)
-    if f is None:
-        print("нет фильтра с таким именем")
-        return
-    run_filter(f["conditions"], f["sort_field"], f["ascending"])
-
-
-def rename_saved_filter():
-    old_name = ask("старое имя: ")
-    new_name = ask("новое имя: ")
-    if saved.rename(old_name, new_name):
-        print("переименовано")
-    else:
-        print("не получилось, проверьте имена")
-
-
-def delete_saved_filter():
-    name = ask("имя фильтра: ")
-    if saved.delete(name):
-        print("удалено")
-    else:
-        print("нет фильтра с таким именем")
-
-
-def list_saved_filters():
-    names = saved.names()
-    if not names:
-        print("сохраненных фильтров нет")
-        return
-    for name in names:
-        print(" -", name)
-
-
-def saved_filters_cmd():
-    print("что сделать с сохраненными фильтрами:")
-    print("  1 сохранить последний фильтр под именем")
-    print("  2 применить сохраненный")
-    print("  3 переименовать")
-    print("  4 удалить")
-    print("  5 показать список")
-    actions = {
-        "1": save_current_filter,
-        "2": apply_saved_filter,
-        "3": rename_saved_filter,
-        "4": delete_saved_filter,
-        "5": list_saved_filters,
-    }
-    action = actions.get(ask("выбор: "))
-    if action is None:
-        print("нет такого пункта")
-    else:
-        action()
-
-
-# --- история просмотров ---
-
-def show_snapshot(snap):
-    # разворачиваем номера задач из снимка в сами задачи
-    tasks = []
-    for task_id in snap.task_ids:
-        task = store.get_by_id(task_id)
-        if task is not None:
-            tasks.append(task)
-    if not tasks:
-        print("задачи из этого результата удалены")
-        return
-    show_tasks(tasks)
-
-
-def history_cmd():
-    print("1 назад   2 вперед")
-    choice = ask("выбор: ")
-    if choice == "1":
-        snap = history.go_back()
-    elif choice == "2":
-        snap = history.go_forward()
-    else:
-        print("нет такого пункта")
-        return
-    if snap is None:
-        print("листать некуда")
-    else:
-        show_snapshot(snap)
-
-
-def save_and_exit_cmd():
-    storage.save_state(STATE_PATH, store, queue, saved)
-    print("состояние сохранено, до встречи")
-    raise SystemExit
-
-
-# --- меню ---
-
-COMMANDS = {
-    "1": ("добавить задачу", add_task_cmd),
-    "2": ("удалить задачу", delete_task_cmd),
-    "3": ("изменить задачу", edit_task_cmd),
-    "4": ("поставить в очередь", enqueue_cmd),
-    "5": ("взять из очереди", dequeue_cmd),
-    "6": ("показать по дедлайну", show_by_deadline_cmd),
-    "7": ("самая ранняя задача", earliest_cmd),
-    "8": ("самая поздняя задача", latest_cmd),
-    "9": ("отменить последнее действие", undo_cmd),
-    "10": ("фильтр", filter_cmd),
-    "11": ("сохраненные фильтры", saved_filters_cmd),
-    "12": ("история просмотров", history_cmd),
-    "0": ("сохранить и выйти", save_and_exit_cmd),
-}
-
-MENU_ORDER = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0"]
-
-
-def print_menu():
-    print("\n=== управление задачами ===")
-    for key in MENU_ORDER:
-        print("  %s %s" % (key, COMMANDS[key][0]))
-
-
-def main():
-    storage.load_state(STATE_PATH, store, queue, bst, saved)
+# спрашивает целое число в диапазоне, повторяет вопрос при ошибке
+def ask_int(prompt, low, high):
     while True:
-        print_menu()
-        command = COMMANDS.get(ask("команда: "))
-        if command is None:
-            print("нет такой команды")
+        text = input(prompt).strip()
+        if text.isdigit() and low <= int(text) <= high:
+            return int(text)
+        print(f"Нужно целое число от {low} до {high}.")
+
+
+# спрашивает необязательное целое число, пустой ответ дает None
+def ask_opt_int(prompt):
+    while True:
+        text = input(prompt).strip()
+        if text == "":
+            return None
+        if text.lstrip("-").isdigit():
+            return int(text)
+        print("Нужно целое число или пустой ответ.")
+
+
+# спрашивает статус из трех допустимых, пустой ответ дает новая
+def ask_status():
+    while True:
+        text = input("Статус, варианты новая, в работе, выполнена (пусто = новая): ").strip()
+        if text == "":
+            return "новая"
+        if text in STATUSES:
+            return text
+        print("Такого статуса нет.")
+
+
+# спрашивает поля новой задачи и добавляет ее
+def add_dialog(tm):
+    name = input("Название: ").strip()
+    if not name:
+        print("Название не может быть пустым.")
+        return
+    priority = ask_int("Приоритет от 1 до 5: ", 1, 5)
+    time = ask_int("Время выполнения в минутах: ", 0, 100000)
+    deadline = input("Дедлайн (ГГГГ-ММ-ДД): ").strip()
+    status = ask_status()
+    category = input("Категория (пусто = прочее): ").strip()
+    try:
+        task = tm.add(name, priority, time, deadline, status, category)
+        print(f"Добавлена задача #{task['id']}.")
+    except ValueError as error:
+        print(f"Ошибка: {error}.")
+
+
+# переводит строку в значение нужного типа для поля задачи
+def convert_value(field, raw):
+    if field in ("priority", "time"):
+        if raw.lstrip("-").isdigit():
+            return int(raw)
+        return None
+    return raw
+
+
+# спрашивает поле и новое значение, меняет задачу
+def edit_dialog(tm, task_id):
+    if tm.by_id.get(task_id) is None:
+        print("Задачи с таким номером нет.")
+        return
+    print("Поля: name, priority, time, deadline, status, category")
+    field = input("Какое поле менять: ").strip()
+    if field not in EDITABLE:
+        print("Такого поля нет.")
+        return
+    raw = input("Новое значение: ").strip()
+    value = convert_value(field, raw)
+    if value is None:
+        print("Значение не подходит для этого поля.")
+        return
+    try:
+        tm.edit(task_id, field, value)
+        print(f"Задача #{task_id} изменена.")
+    except ValueError as error:
+        print(f"Ошибка: {error}.")
+
+
+# спрашивает поле и порядок сортировки результата
+def ask_sort():
+    print("Поля сортировки: deadline, priority, time, name")
+    field = input("Сортировать по (пусто = deadline): ").strip()
+    if field not in SORT_FIELDS:
+        field = "deadline"
+    order = input("Порядок: 1 по возрастанию, 2 по убыванию (пусто = 1): ").strip()
+    return field, order != "2"
+
+
+# выводит результат фильтрации и кладет его в историю просмотров
+def show_result(found, label, history):
+    history.add({"label": label, "ids": [task["id"] for task in found]})
+    print(f"Фильтр: {label}")
+    print(f"Найдено задач: {len(found)}")
+    print_tasks(found)
+
+
+# спрашивает условия фильтра, выполняет его и запоминает как последний
+def find_dialog(tm, history, last):
+    f = empty_filter()
+    print("Пустой ответ значит, что условие не используется.")
+    status = input("Статус: ").strip()
+    if status:
+        f["status"] = status
+    category = input("Категория: ").strip()
+    if category:
+        f["category"] = category
+    f["priority_from"] = ask_opt_int("Приоритет от: ")
+    f["priority_to"] = ask_opt_int("Приоритет до: ")
+    deadline_from = input("Дедлайн от (ГГГГ-ММ-ДД): ").strip()
+    if deadline_from:
+        f["deadline_from"] = deadline_from
+    deadline_to = input("Дедлайн до (ГГГГ-ММ-ДД): ").strip()
+    if deadline_to:
+        f["deadline_to"] = deadline_to
+    keyword = input("Ключевое слово в названии: ").strip()
+    if keyword:
+        f["keyword"] = keyword
+    f["time_from"] = ask_opt_int("Время выполнения от: ")
+    f["time_to"] = ask_opt_int("Время выполнения до: ")
+
+    sort_field, ascending = ask_sort()
+    found = run_filter(tm.tasks, f, sort_field, ascending)
+    label = describe(f, sort_field, ascending)
+    last["filter"] = dict(f)
+    last["sort_field"] = sort_field
+    last["ascending"] = ascending
+    show_result(found, label, history)
+
+
+# показывает сохраненный результат фильтрации по его номерам задач
+def show_view(tm, view):
+    print(f"Фильтр: {view['label']}")
+    tasks = []
+    for i in view["ids"]:
+        if i in tm.by_id:
+            tasks.append(tm.by_id[i])
+    print(f"Найдено задач: {len(tasks)}")
+    print_tasks(tasks)
+
+
+# добавляет несколько задач для демонстрации работы программы
+def seed(tm):
+    tm.add("Выполнить дз", 5, 600, "2026-06-15", "в работе", "учеба")
+    tm.add("Купить продукты", 2, 40, "2026-06-11", "новая", "дом")
+    tm.add("Подготовить презентацию", 4, 120, "2026-06-13", "новая", "учеба")
+    tm.add("Тренировка в зале", 1, 90, "2026-06-12", "новая", "спорт")
+    tm.add("Ответить на письма", 3, 30, "2026-06-11", "выполнена", "работа")
+    tm.add("Сдать отчет по практике", 5, 180, "2026-06-14", "в работе", "учеба")
+    # демонстрационные задачи не считаем действиями пользователя
+    tm.undo_stack.items = []
+
+
+# предлагает загрузить демонстрационные задачи при старте
+def maybe_seed(tm):
+    answer = input("Загрузить демонстрационные задачи? (д/н): ").strip().lower()
+    if answer == "д":
+        seed(tm)
+        print(f"Добавлено демонстрационных задач: {len(tm.tasks)}.")
+
+
+# достает номер задачи из остатка команды, иначе None
+def parse_id(rest):
+    if rest.isdigit():
+        return int(rest)
+    return None
+
+
+# обрабатывает команды, которые работают с задачами и очередью
+def handle_task_command(tm, word, rest):
+    if word == "add":
+        add_dialog(tm)
+        return True
+    if word == "del":
+        task_id = parse_id(rest)
+        if task_id is None:
+            print("Укажите номер задачи, например: del 3.")
+        elif tm.delete(task_id) is None:
+            print("Задачи с таким номером нет.")
+        else:
+            print(f"Задача #{task_id} удалена.")
+        return True
+    if word == "edit":
+        task_id = parse_id(rest)
+        if task_id is None:
+            print("Укажите номер задачи, например: edit 3.")
+        else:
+            edit_dialog(tm, task_id)
+        return True
+    if word == "list":
+        print("Задачи по возрастанию дедлайна:")
+        print_tasks(tm.ordered())
+        return True
+    if word == "early":
+        tasks = tm.earliest()
+        if not tasks:
+            print("Задач нет.")
+        else:
+            print("Самый ранний дедлайн:")
+            print_tasks(tasks)
+        return True
+    if word == "late":
+        tasks = tm.latest()
+        if not tasks:
+            print("Задач нет.")
+        else:
+            print("Самый поздний дедлайн:")
+            print_tasks(tasks)
+        return True
+    if word == "enqueue":
+        task_id = parse_id(rest)
+        if task_id is None:
+            print("Укажите номер задачи, например: enqueue 3.")
+        elif tm.enqueue(task_id) is None:
+            print("Задачи с таким номером нет.")
+        else:
+            print(f"Задача #{task_id} поставлена в очередь.")
+        return True
+    if word == "next":
+        task = tm.run_next()
+        if task is None:
+            print("Очередь пуста.")
+        else:
+            print(f"Исполнена задача #{task['id']}: {task['name']}. Статус выполнена.")
+        return True
+    if word == "queue":
+        ids = tm.queue.to_list()
+        if not ids:
+            print("Очередь пуста.")
+        else:
+            print("Очередь на исполнение:")
+            print_tasks([tm.by_id[i] for i in ids if i in tm.by_id])
+        return True
+    if word == "undo":
+        print(tm.undo())
+        return True
+    return False
+
+
+# обрабатывает команды поиска, сохраненных фильтров и истории
+def handle_query_command(tm, word, rest, saved, history, last):
+    if word == "find":
+        find_dialog(tm, history, last)
+        return True
+    if word == "save":
+        if not rest:
+            print("Укажите имя фильтра, например: save срочное.")
+        elif last["filter"] is None:
+            print("Сначала выполните find.")
+        else:
+            saved.save(rest, last["filter"], last["sort_field"], last["ascending"])
+            print(f"Фильтр сохранен под именем {rest}.")
+        return True
+    if word == "run":
+        item = saved.get(rest)
+        if item is None:
+            print("Такого фильтра нет.")
+        else:
+            found = run_filter(tm.tasks, item["filter"], item["sort_field"], item["ascending"])
+            label = describe(item["filter"], item["sort_field"], item["ascending"])
+            last["filter"] = dict(item["filter"])
+            last["sort_field"] = item["sort_field"]
+            last["ascending"] = item["ascending"]
+            show_result(found, label, history)
+        return True
+    if word == "saved":
+        names = saved.names()
+        if not names:
+            print("Сохраненных фильтров нет.")
+        else:
+            print("Сохраненные фильтры:")
+            for name in names:
+                item = saved.get(name)
+                print(f"  {name} - {describe(item['filter'], item['sort_field'], item['ascending'])}")
+        return True
+    if word == "rename":
+        pair = rest.split()
+        if len(pair) != 2:
+            print("Нужно старое и новое имя, например: rename срочное важное.")
+        elif saved.rename(pair[0], pair[1]):
+            print(f"Фильтр {pair[0]} теперь называется {pair[1]}.")
+        else:
+            print("Переименовать не вышло, проверьте имена.")
+        return True
+    if word == "drop":
+        if saved.delete(rest):
+            print(f"Фильтр {rest} удален.")
+        else:
+            print("Такого фильтра нет.")
+        return True
+    if word == "back":
+        view = history.go_back()
+        if view is None:
+            print("Назад нельзя, это первый результат.")
+        else:
+            show_view(tm, view)
+        return True
+    if word == "forward":
+        view = history.go_forward()
+        if view is None:
+            print("Вперед нельзя, это последний результат.")
+        else:
+            show_view(tm, view)
+        return True
+    return False
+
+
+# главный цикл программы
+def main():
+    print("        МЕНЕДЖЕР ЗАДАЧ")
+    tm = TaskManager()
+    saved = SavedQueries()
+    history = ViewHistory()
+    last = {"filter": None, "sort_field": "deadline", "ascending": True}
+
+    maybe_seed(tm)
+    show_help()
+
+    while True:
+        line = input("\n> ").strip()
+        if not line:
             continue
-        command[1]()
+        parts = line.split()
+        word = parts[0].lower()
+        rest = line[len(parts[0]):].strip()   # все после первого слова, регистр сохранен
+
+        if word == "quit":
+            print("Выход.")
+            break
+        if word == "help":
+            show_help()
+            continue
+        if handle_task_command(tm, word, rest):
+            continue
+        if handle_query_command(tm, word, rest, saved, history, last):
+            continue
+
+        print("Неизвестная команда. Введите help для списка команд.")
 
 
 if __name__ == "__main__":
