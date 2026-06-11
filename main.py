@@ -69,6 +69,13 @@ def ask_status():
             return text
         print("Такого статуса нет.")
 
+# спрашивает дату, повторяет вопрос пока формат неверный
+def ask_date(prompt):
+    while True:
+        text = input(prompt).strip()
+        if valid_date(text):
+            return text
+        print("Дата должна быть в формате ГГГГ-ММ-ДД, например 2026-06-15.")
 
 # спрашивает поля новой задачи и добавляет ее
 def add_dialog(tm):
