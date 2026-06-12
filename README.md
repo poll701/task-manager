@@ -73,21 +73,21 @@
 
 ## Над проектом работали
 
-### 1
+### Черник Полина
 
 - Класс `Stack` с методами `push`, `pop`, `is_empty` (`structures.py`)
 - Класс `Queue` с методами `enqueue`, `dequeue`, `remove`, `to_list` (`structures.py`)
 - Классы `Node` и `BST`, методы `insert`, `rebuild`, `in_order`, `earliest`, `latest` (`structures.py`)
 - Команды `list`, `early`, `late`, `enqueue`, `next`, `queue` в `handle_task_command` (`main.py`)
 
-### 2
+### Малыгина Полина
 
 - Модель задачи, проверка полей `build_task`, `valid_date` (`manager.py`)
 - Класс `TaskManager`, методы `add`, `delete`, `edit` (`manager.py`)
 - Отмена действий `undo` и работа с очередью `enqueue`, `run_next` (`manager.py`)
 - Диалоги `add_dialog`, `edit_dialog` и команды `add`, `del`, `edit`, `undo` (`main.py`)
 
-### 3
+### Трушникова Алёна
 
 - Фильтрация `matches`, `run_filter` и описание фильтра `describe` (`filters.py`)
 - Именованные фильтры `SavedQueries` и история просмотров `ViewHistory` (`filters.py`)
